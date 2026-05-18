@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -16,14 +17,10 @@ SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 INSECURE_TLS = os.environ.get("GIGACHAT_INSECURE_TLS", "1") == "1"
 BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
 
-# Кеш токена
 _token_cache = {"access_token": None, "expires_at": 0}
 
 def get_access_token():
-    """Получить или обновить access token GigaChat."""
     global _token_cache
-    
-    # Если токен ещё жив, возвращаем его
     if _token_cache["access_token"] and time.time() < _token_cache["expires_at"]:
         return _token_cache["access_token"]
 
@@ -37,39 +34,19 @@ def get_access_token():
     payload = {"scope": SCOPE}
     
     try:
-        resp = requests.post(
-            url, 
-            headers=headers, 
-            data=payload, 
-            verify=False,  # INSECURE_TLS
-            timeout=15
-        )
-        print(f"📡 OAuth ответ: статус {resp.status_code}")
-        
+        resp = requests.post(url, headers=headers, data=payload, verify=False, timeout=15)
         if resp.status_code != 200:
-            print(f"❌ Тело ответа: {resp.text}")
             raise Exception(f"OAuth вернул {resp.status_code}: {resp.text[:200]}")
-        
         data = resp.json()
-        print(f"✅ Токен получен, expires_in = {data.get('expires_in', 'НЕТ ПОЛЯ')}")
-        
         _token_cache["access_token"] = data["access_token"]
-        # Используем expires_in если есть, иначе дефолт 30 минут
         expires_in = data.get("expires_in", 1800)
         _token_cache["expires_at"] = time.time() + expires_in - 60
-        
         return _token_cache["access_token"]
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Ошибка сети при получении токена: {e}")
-        raise
-    except KeyError as e:
-        print(f"❌ В ответе нет поля access_token: {e}")
-        print(f"📄 Тело ответа: {resp.text if 'resp' in locals() else 'нет ответа'}")
+    except Exception as e:
+        print(f"❌ Ошибка токена: {e}")
         raise
 
 def gigachat_request(messages, temperature=0.9, max_tokens=300):
-    """Отправить запрос в GigaChat API."""
     token = get_access_token()
     url = f"{BASE_URL}/chat/completions"
     headers = {
@@ -83,24 +60,9 @@ def gigachat_request(messages, temperature=0.9, max_tokens=300):
         "max_tokens": max_tokens,
         "top_p": 0.95
     }
-    
-    print(f"📤 Отправляю запрос в GigaChat...")
-    resp = requests.post(
-        url, 
-        headers=headers, 
-        json=payload, 
-        verify=False, 
-        timeout=30
-    )
-    
-    if resp.status_code != 200:
-        print(f"❌ GigaChat API ошибка: {resp.status_code}")
-        print(f"📄 Тело: {resp.text[:300]}")
-        resp.raise_for_status()
-    
-    data = resp.json()
-    print(f"✅ Ответ получен, длина: {len(data.get('choices', [{}])[0].get('message', {}).get('content', ''))} символов")
-    return data
+    resp = requests.post(url, headers=headers, json=payload, verify=False, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 # ---------- Промпты ----------
 SYSTEM_PROMPT = (
@@ -108,15 +70,10 @@ SYSTEM_PROMPT = (
     "Твоя задача: придумывать уморительные, неожиданные, иногда абсурдные, "
     "но всегда стильные отговорки на любую жизненную ситуацию. "
     "Отвечай только самой отмазкой (1-3 предложения), без лишних слов и пояснений. "
-    "Используй живой русский язык, юмор, отсылки к поп-культуре. "
-    "Если категория — начальник, пусть звучит деловито-нелепо; "
-    "если партнёр — романтично-смешно; "
-    "если друзья — по-свойски; "
-    "если школа/универ — креативно-ученически."
+    "Используй живой русский язык, юмор, отсылки к поп-культуре."
 )
 
 def build_prompt(category=None, user_prompt=None):
-    """Собрать user-сообщение для GigaChat."""
     category_map = {
         "boss": "Придумай отмазку для начальника, почему я опоздал / не пришёл на работу.",
         "partner": "Придумай отмазку для любимого человека: забыл важную дату или не пришёл на свидание.",
@@ -124,24 +81,16 @@ def build_prompt(category=None, user_prompt=None):
         "school": "Придумай отмазку для учителя / преподавателя: не сделал домашку, опоздал.",
         "random": "Придумай совершенно случайную, максимально креативную и смешную отмазку на любой случай."
     }
-    
     if category and category in category_map:
-        user_content = category_map[category]
+        return category_map[category]
     elif user_prompt:
-        user_content = f"Пользователь описал ситуацию: «{user_prompt}». Придумай подходящую отмазку."
-    else:
-        user_content = "Придумай универсальную отмазку."
-    
-    return user_content
+        return f"Пользователь описал ситуацию: «{user_prompt}». Придумай подходящую отмазку."
+    return "Придумай универсальную отмазку."
 
 # ---------- Маршруты ----------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "OtmazOK backend",
-        "gigachat_configured": bool(AUTH_KEY)
-    })
+    return jsonify({"status": "ok", "service": "OtmazOK backend"})
 
 @app.route("/generate", methods=["POST"])
 def generate():
@@ -153,7 +102,6 @@ def generate():
         return jsonify({"error": "Укажите category или prompt"}), 400
 
     user_content = build_prompt(category, user_prompt)
-
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content}
@@ -161,15 +109,16 @@ def generate():
 
     try:
         result = gigachat_request(messages)
-        excuse = result["choices"][0]["message"]["content"].strip()
+        excuse = result["choices"][0]["message"]["content"].strip().strip('"').strip("'")
         
-        # Убираем возможные кавычки и лишние префиксы
-        excuse = excuse.strip('"').strip("'").strip()
+        # Генерируем правдоподобность (можно заменить на второй запрос к ИИ)
+        plausibility = random.randint(5, 10)  # Отмазки всегда хотя бы на 5/10
         
         return jsonify({
             "excuse": excuse,
             "category": category,
-            "prompt": user_prompt
+            "prompt": user_prompt,
+            "plausibility": plausibility
         })
     except Exception as e:
         print(f"❌ Ошибка генерации: {e}")
@@ -179,11 +128,11 @@ def generate():
 def list_categories():
     return jsonify({
         "categories": [
-            {"id": "boss", "name": "Для начальника", "icon": "👔"},
-            {"id": "partner", "name": "Для партнёра", "icon": "💔"},
-            {"id": "friends", "name": "Перед друзьями", "icon": "🍻"},
-            {"id": "school", "name": "Учителю/преподу", "icon": "📚"},
-            {"id": "random", "name": "Случайная гениальность", "icon": "🎲"}
+            {"id": "boss", "name": "Для начальника", "icon": "👔", "sendLabel": "Отправить боссу"},
+            {"id": "partner", "name": "Для партнёра", "icon": "💔", "sendLabel": "Отправить партнёру"},
+            {"id": "friends", "name": "Перед друзьями", "icon": "🍻", "sendLabel": "Отправить другу"},
+            {"id": "school", "name": "Учителю/преподу", "icon": "📚", "sendLabel": "Отправить преподу"},
+            {"id": "random", "name": "Случайная гениальность", "icon": "🎲", "sendLabel": "Отправить контакту"}
         ]
     })
 
